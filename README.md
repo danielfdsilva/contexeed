@@ -1,21 +1,28 @@
-# Contexeed
+# Contexeed v2
+
+⚠️⚠️ There are currently no unit tests, use at your own risk. Code is likely to change. ⚠️⚠️
 
 Contexeed can be used to create a reducer and actions to manage api calls.
+
+**More documentation to come**
 
 ```js
 // Values returned by useContexeedApi
 const {
   /* All the request thunks defined in the config */
-  [requestThunks]
+  ...requestThunks,
   /* All the mutation thunks defined in the config */
-  [mutationThunks]
-  /* Function to invalidate the state and set it as the initial value */
+  ...mutationThunks,
+  /** Invalidate action already dispatchable. If contexeed is defined as a
+   * slicedState a key will be required. */
   invalidate,
-  /* Function to get the appropriate state, using a key if contexeed was configured to use a key */
+  /** Function to get the current state. If contexeed is defined as a
+   * slicedState a key will be required and the returned state will be a state
+   * slice. */
   getState,
-  /* The raw reducer state */
+  /** The state in raw format as stored in the reducer. */
   rawState,
-  /* Reducer dispatch function */
+  /** The reducer's dispatch function. It supports dispatching thunks. */
   dispatch
 } = useContexeedApi(options);
 ```
@@ -25,7 +32,13 @@ All the options accepted by useContexeedApi() can be found in `types.ts` under `
 ## Example
 
 ```js
-  const { getState, fetchAll, fetchOne, deleteOne } = useContexeedApi({
+  const {
+    getState,
+    fetchAll,
+    fetchOne,
+    updateOne,
+    deleteOne
+  } = useContexeedApi({
     name: 'myData',
     requests: {
       fetchAll: () => ({
@@ -36,25 +49,54 @@ All the options accepted by useContexeedApi() can be found in `types.ts` under `
       })
     },
     mutations: {
-      deleteOne: (id) => ({
-        mutation: async ({ axios, requestOptions, state, actions }) => {
-          try {
-            // Dispatch request action. It is already dispatchable.
-            actions.request();
-
-            await axios({
-              ...requestOptions,
-              url: `/example/${id}`,
-              method: 'delete'
-            });
-
-            return actions.receive(newData);
-          } catch (error) {
-            // Dispatch receive action. It is already dispatchable.
-            return actions.receive(null, error);
-          }
+      updateOne: (id, data) => ({
+        url: `/example/${id}`,
+        requestOptions: {
+          method: 'post',
+          data
         }
-      })
+      }),
+      deleteOne: (id) => ({
+        url: `/example/${id}`,
+        requestOptions: {
+          method: 'delete'
+        },
+        onDone: (finish, { error, invalidate }) => {
+          // When we delete something we want to invalidate the state.
+          return !error ? invalidate() : finish();
+        }
+      }),
+      // If no hook functions are provided, this is the default.
+      defaultWithAllSteps: () => {
+        url: `/example`,
+        requestOptions: {
+          method: 'post'
+          headers: {
+            Authorization: 'Bearer something'
+          },
+          data: {
+            title: 'Some title'
+          }
+        },
+        overrideRequest: async ({ axios, requestOptions }) => {
+          const response =  await axios({
+            url: `/example`,
+            ...requestOptions
+          });
+
+          // By default the data part of the axios response is passed to transformData.
+          return response.data;
+        },
+        transformData: (data) => {
+          return data;
+        }),
+        transformError: (error) => {
+          return error;
+        }),
+        onDone: (finish) => {
+          return finish();
+        })
+      }
     }
   });
 ```

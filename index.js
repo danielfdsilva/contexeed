@@ -1,13 +1,10 @@
 import { useMemo, useCallback } from 'react';
-import axios from 'axios';
 
+import { useReducerWithThunk } from './use-reducer-thunk';
 import { withReducerLogs } from './with-reducer-log';
 import { withReducerInterceptor } from './with-reducer-interceptor';
-import { useReducerWithThunk } from './use-reducer-thunk';
 import { makeReducer } from './make-reducer';
-import { makeActions } from './make-actions';
-import { makeRequestThunk } from './make-request-thunk';
-import { getStateSlice } from './utils';
+import { makeApiAction } from './make-api-action';
 
 // status: 'idle' | 'loading' | 'succeeded' | 'failed'
 const baseContexeedState = {
@@ -22,18 +19,24 @@ const baseContexeedState = {
 // from the parent. This triggers warning with eslint but it is accounted for.
 
 export function useContexeedApi(config, deps = []) {
-  const { name, useKey, interceptor, requests = {}, mutations = {} } = config;
+  const {
+    name,
+    slicedState,
+    interceptor,
+    requests = {},
+    mutations = {}
+  } = config;
 
   // Memoize values
   const { initialState, reducer, actions } = useMemo(() => {
-    // If there's a key the overall state needs to start empty. Id keys will be
+    // If we're using a sliced state, it needs to start empty. Id keys will be
     // added at a later stage resulting in something like:
     // {
     //   key1: baseContexeedState,
     //   key2: baseContexeedState,
     //   ...
     // }
-    const initialState = useKey ? {} : baseContexeedState;
+    const initialState = slicedState ? {} : baseContexeedState;
 
     const reducer = withReducerLogs(
       withReducerInterceptor(
@@ -42,18 +45,26 @@ export function useContexeedApi(config, deps = []) {
           // When creating the reducer we need the initial state, to be able to
           // use the invalidate function.
           initialState,
-          // The base state is used as the source for missing properties. We start
-          // from the base state and replace what's needed. In this way we ensure
-          // state consistency.
+          // The base state is used as the source for missing properties. We
+          // start from the base state and replace what's needed. In this way we
+          // ensure state consistency.
           baseState: baseContexeedState
         }),
         interceptor
       )
     );
 
-    // Create the actions needed by the thunk (request and receive), and the
+    // Create the actions needed by the thunk (begin and end), and the
     // invalidate action to clean the state.
-    const actions = makeActions({ name, useKey });
+    const actions = {
+      begin: (params) => ({ ...params, type: `begin/${name}` }),
+      end: (params) => ({
+        receivedAt: Date.now(),
+        ...params,
+        type: `end/${name}`
+      }),
+      invalidate: (params) => ({ ...params, type: `invalidate/${name}` })
+    };
 
     return {
       initialState,
@@ -72,7 +83,13 @@ export function useContexeedApi(config, deps = []) {
   const requestActions = useMemo(
     () =>
       Object.keys(requests).reduce((acc, fnName) => {
-        const fn = makeRequestAction(config, fnName, actions);
+        const fn = makeApiAction({
+          type: 'requests',
+          fn: requests[fnName],
+          fnName,
+          config,
+          actions
+        });
         return {
           ...acc,
           [fnName]: (...args) => dispatch(fn(...args))
@@ -87,7 +104,13 @@ export function useContexeedApi(config, deps = []) {
   const mutationActions = useMemo(
     () =>
       Object.keys(mutations).reduce((acc, fnName) => {
-        const fn = makeMutationAction(config, fnName, actions);
+        const fn = makeApiAction({
+          type: 'mutations',
+          fn: mutations[fnName],
+          fnName,
+          config,
+          actions
+        });
         return {
           ...acc,
           [fnName]: (...args) => dispatch(fn(...args))
@@ -99,9 +122,9 @@ export function useContexeedApi(config, deps = []) {
 
   const invalidate = useCallback(
     (key) => {
-      if (useKey && !key) {
+      if (slicedState && !key) {
         throw new Error(
-          `The contexeed \`${name}\` is setup to use a key (useKey), but you're using invalidate action without a key value.`
+          `The contexeed \`${name}\` is setup as a sliced state (slicedState), but you're using invalidate action without a key value.`
         );
       }
       return dispatch(actions.invalidate(key));
@@ -112,20 +135,20 @@ export function useContexeedApi(config, deps = []) {
 
   const getState = useCallback(
     (key) => {
-      // If the config defines this contexeed as `useKey`, the `key` becomes
+      // If the config defines this contexeed as `slicedState`, the `key` becomes
       // required.
-      if (useKey && !key) {
+      if (slicedState && !key) {
         throw new Error(
-          `The contexeed \`${name}\` is setup to use a key (useKey), but you're using getState without a key value.`
+          `The contexeed \`${name}\` is setup as a sliced state (slicedState), but you're using getState without a key value.`
         );
       }
-      if (!useKey && key) {
+      if (!slicedState && key) {
         throw new Error(
-          `The contexeed \`${name}\` is not setup to use a key (useKey), but you're using getState with a key value.`
+          `The contexeed \`${name}\` is not setup as a sliced state (slicedState), but you're using getState with a key value.`
         );
       }
 
-      return (useKey ? state[key] : state) || baseContexeedState;
+      return (slicedState ? state[key] : state) || baseContexeedState;
     },
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
     [state, ...deps]
@@ -140,122 +163,3 @@ export function useContexeedApi(config, deps = []) {
     dispatch
   };
 }
-
-// Config example for contexeed:
-// {
-//   name: 'example',
-//   useKey: true,
-//   requests: {
-//     fetchSingleAtbd: ({id}) => ({
-//       url: `/atbds/${id}`,
-//       stateKey: `${id}`
-//     })
-//   },
-//   mutations: {
-//     updateAtbd: ({id}) => ({
-//       stateKey: `${id}`,
-//       mutation: () => {}
-//     })
-//   }
-// }
-
-const makeRequestAction = (config, fnName, actions) => {
-  const { name, useKey, requests = {} } = config;
-  const { request, receive } = actions;
-
-  return (...args) => {
-    // Extract the state key from the returned params.
-    const { stateKey, ...rest } = requests[fnName](...args);
-
-    // If the config defines this contexeed as `useKey`, the `stateKey` becomes
-    // required.
-    if (useKey && !stateKey) {
-      throw new Error(
-        `The contexeed \`${name}\` is setup to use a key (useKey), but \`requests.${fnName}\` is not returning a stateKey.`
-      );
-    }
-
-    return makeRequestThunk({
-      ...rest,
-      stateKey,
-      requestFn: stateKey ? request.bind(null, stateKey) : request,
-      receiveFn: stateKey ? receive.bind(null, stateKey) : receive
-    });
-  };
-};
-
-const makeMutationAction = (config, fnName, actions) => {
-  const { name, useKey, mutations = {} } = config;
-  const { request, receive, invalidate } = actions;
-
-  return (...args) => {
-    // Extract the state key from the returned params.
-    const { stateKey, mutation, options } = mutations[fnName](...args);
-
-    // If the config defines this contexeed as `useKey`, the `stateKey` becomes
-    // required.
-    if (useKey && !stateKey) {
-      throw new Error(
-        `The contexeed \`${name}\` is setup to use a key (useKey), but \`mutations.${fnName}\` is not returning a stateKey.`
-      );
-    }
-
-    // Call the given action with the stateKey if is set.
-    const callAction = (actionFn, args) => {
-      const action = stateKey ? actionFn(stateKey, ...args) : actionFn(...args);
-      return { ...action, isMutation: true };
-    };
-
-    return async function (dispatch, state) {
-      const { stateSlice } = getStateSlice(state, stateKey);
-
-      // Actions for mutations have a isMutation key.
-      const dispatchableActions = {
-        request: (...args) => dispatch(callAction(request, args)),
-        receive: (...args) => dispatch(callAction(receive, args)),
-        invalidate: (...args) => dispatch(callAction(invalidate, args)),
-        dispatch
-      };
-
-      return mutation({
-        axios,
-        requestOptions: options,
-        state: stateSlice,
-        actions: dispatchableActions
-      });
-    };
-  };
-};
-
-/**
- * With a simple mutation this helper reduces boilerplate.
- * Used as:
- *
- * mutation: simpleMutation({
- *            url: `/atbds/${id}`,
- *            method: 'delete'
- *          })
- *
- * @param {object} params parameters for the request.
- */
-export const simpleMutation = (params) => async ({
-  axios,
-  requestOptions,
-  actions
-}) => {
-  try {
-    // Dispatch request action. It is already dispatchable.
-    actions.request();
-
-    const response = await axios({
-      ...requestOptions,
-      ...params
-    });
-
-    // Dispatch receive action. It is already dispatchable.
-    return actions.receive(response.data);
-  } catch (error) {
-    // Dispatch receive action. It is already dispatchable.
-    return actions.receive(null, error);
-  }
-};
